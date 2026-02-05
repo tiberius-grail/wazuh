@@ -115,19 +115,19 @@ in {
         enable = lib.mkEnableOption "SSL certificate authentication for agent registration";
 
         rootCA = lib.mkOption {
-          type = lib.types.path;
+          type = lib.types.str;
           description = "Path to the root CA certificate for verifying the manager";
           example = "/path/to/rootCA.pem";
         };
 
         cert = lib.mkOption {
-          type = lib.types.path;
+          type = lib.types.str;
           description = "Path to the agent SSL certificate";
           example = "/path/to/sslagent.cert";
         };
 
         key = lib.mkOption {
-          type = lib.types.path;
+          type = lib.types.str;
           description = "Path to the agent SSL private key";
           example = "/path/to/sslagent.key";
         };
