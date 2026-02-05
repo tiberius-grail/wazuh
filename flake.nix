@@ -1,5 +1,5 @@
 {
-  description = "A very basic flake";
+  description = "Wazuh Agent for NixOS";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
@@ -13,21 +13,32 @@
   }:
     {
       overlays = {
-        wazuh = final: prev: {
-          wazuh-agent = final.callPackage ./pkgs/wazuh-agent.nix {};
+        default = final: prev: {
+          wazuh-agent = final.callPackage ./pkgs/wazuh-agent.nix {
+            # Use GCC 14 to avoid incompatible-pointer-types errors in GCC 15
+            stdenv = final.gcc14Stdenv;
+          };
         };
+        # Legacy alias
+        wazuh = self.overlays.default;
       };
       nixosModules = {
         wazuh-agent = import ./modules/wazuh-agent;
+        default = self.nixosModules.wazuh-agent;
       };
     } // flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
       in
-        with pkgs;
-        {
-          formatter = alejandra;
-          packages.wazuh-agent = pkgs.callPackage ./pkgs/wazuh-agent.nix {};
-        }
+      {
+        formatter = pkgs.alejandra;
+        packages = {
+          wazuh-agent = pkgs.callPackage ./pkgs/wazuh-agent.nix {
+            # Use GCC 14 to avoid incompatible-pointer-types errors in GCC 15
+            stdenv = pkgs.gcc14Stdenv;
+          };
+          default = self.packages.${system}.wazuh-agent;
+        };
+      }
     );
 }

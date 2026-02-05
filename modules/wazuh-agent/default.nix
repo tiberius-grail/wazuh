@@ -70,6 +70,14 @@ let
       };
     };
 
+  # Build agent-auth command with optional args
+  agentAuthCmd = let
+    baseCmd = "${pkg}/bin/agent-auth -m ${cfg.managerIP}";
+    nameArg = optionalString (cfg.agentName != null) " -A ${cfg.agentName}";
+    sslArgs = optionalString cfg.ssl.enable
+      " -v ${stateDir}/etc/rootCA.pem -x ${stateDir}/etc/sslagent.cert -k ${stateDir}/etc/sslagent.key";
+  in baseCmd + nameArg + sslArgs;
+
 in {
   options = {
     services.wazuh-agent = {
@@ -90,6 +98,39 @@ in {
         '';
         example = 1514;
         default = 1514;
+      };
+
+      agentName = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "myuser-myhost";
+        description = ''
+          The agent name to register with the Wazuh manager.
+          If null, defaults to the system hostname.
+          Only alphanumeric characters, hyphens, and underscores are allowed.
+        '';
+      };
+
+      ssl = {
+        enable = lib.mkEnableOption "SSL certificate authentication for agent registration";
+
+        rootCA = lib.mkOption {
+          type = lib.types.path;
+          description = "Path to the root CA certificate for verifying the manager";
+          example = "/path/to/rootCA.pem";
+        };
+
+        cert = lib.mkOption {
+          type = lib.types.path;
+          description = "Path to the agent SSL certificate";
+          example = "/path/to/sslagent.cert";
+        };
+
+        key = lib.mkOption {
+          type = lib.types.path;
+          description = "Path to the agent SSL private key";
+          example = "/path/to/sslagent.key";
+        };
       };
 
       package = lib.mkPackageOption pkgs "wazuh-agent" {};
@@ -140,6 +181,11 @@ in {
           with cfg; (config == null) -> (extraConfig != null);
         message = "extraConfig cannot be set when config is set";
       }
+      {
+        assertion =
+          !cfg.ssl.enable || (cfg.ssl.rootCA != null && cfg.ssl.cert != null && cfg.ssl.key != null);
+        message = "ssl.rootCA, ssl.cert, and ssl.key must all be set when ssl.enable is true";
+      }
     ];
     users.users.${wazuhUser} = {
       isSystemUser = true;
@@ -167,36 +213,71 @@ in {
       {
         wazuh-agent-auth = {
           description = "Sets up wazuh agent auth";
-          after = [ "setup-pre-wazuh.service" "network.target" "network-online.target" ];
-          wants = [ "setup-pre-wazuh.service" "network-online.target" ];
+          after = [ "setup-pre-wazuh.service" "network.target" "network-online.target" ]
+            ++ optional cfg.ssl.enable "wazuh-certs-setup.service";
+          wants = [ "setup-pre-wazuh.service" "network-online.target" ]
+            ++ optional cfg.ssl.enable "wazuh-certs-setup.service";
           before = map (d: "${d}.service") daemons;
           environment = {
             WAZUH_HOME = stateDir;
+          };
+
+          unitConfig = {
+            # Only run if not already registered
+            ConditionPathExists = "!${stateDir}/etc/client.keys";
           };
 
           serviceConfig = {
             Type = "oneshot";
             User = wazuhUser;
             Group = wazuhGroup;
-            ExecStart = ''
-              ${pkg}/bin/agent-auth -m ${config.services.wazuh-agent.managerIP}
-            '';
-            };
+            WorkingDirectory = stateDir;
+            ExecStart = agentAuthCmd;
+          };
         };
 
         setup-pre-wazuh = {
-         description = "Sets up wazuh's directory structure";
-         wantedBy = ["wazuh-agent-auth.service"];
-         before = ["wazuh-agent-auth.service"];
-         serviceConfig = {
-           Type = "oneshot";
-           User = wazuhUser;
-           Group = wazuhGroup;
-           ExecStart =
-             let
-               script = pkgs.writeShellApplication { name = "wazuh-prestart"; text = preStart; };
-             in "${script}/bin/wazuh-prestart";
-         };
+          description = "Sets up wazuh's directory structure";
+          wantedBy = ["wazuh-agent-auth.service"];
+          before = ["wazuh-agent-auth.service"];
+          serviceConfig = {
+            Type = "oneshot";
+            User = wazuhUser;
+            Group = wazuhGroup;
+            ExecStart =
+              let
+                script = pkgs.writeShellApplication { name = "wazuh-prestart"; text = preStart; };
+              in "${script}/bin/wazuh-prestart";
+            ExecStartPre = let
+              # Create base directory with root permissions
+              createDir = pkgs.writeShellScript "create-ossec-dir" ''
+                mkdir -p ${stateDir}
+                chown ${wazuhUser}:${wazuhGroup} ${stateDir}
+              '';
+            in "+${createDir}";
+          };
+        };
+
+        # SSL certificate setup service
+        wazuh-certs-setup = mkIf cfg.ssl.enable {
+          description = "Setup Wazuh SSL certificates";
+          wantedBy = [ "multi-user.target" ];
+          wants = [ "setup-pre-wazuh.service" ];
+          after = [ "setup-pre-wazuh.service" ];
+          before = [ "wazuh-agent-auth.service" ];
+          serviceConfig = {
+            Type = "oneshot";
+            RemainAfterExit = true;
+            ExecStart = pkgs.writeShellScript "wazuh-certs-setup" ''
+              # Wait for /var/ossec/etc to exist
+              while [ ! -d ${stateDir}/etc ]; do sleep 1; done
+              cp ${cfg.ssl.rootCA} ${stateDir}/etc/rootCA.pem
+              cp ${cfg.ssl.cert} ${stateDir}/etc/sslagent.cert
+              cp ${cfg.ssl.key} ${stateDir}/etc/sslagent.key
+              chmod 640 ${stateDir}/etc/rootCA.pem ${stateDir}/etc/sslagent.cert ${stateDir}/etc/sslagent.key
+              chown ${wazuhUser}:${wazuhGroup} ${stateDir}/etc/rootCA.pem ${stateDir}/etc/sslagent.cert ${stateDir}/etc/sslagent.key
+            '';
+          };
         };
       };
 
